@@ -15,7 +15,7 @@ ROOT = FILE.parents[1]  # YOLOv5 root directory
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from models.yolo_npu import DetectionModelNPU
+from models.yolo_simple import DetectionModelSimple
 from utils.general import (
     LOGGER,
     Profile,
@@ -25,7 +25,7 @@ from utils.general import (
     check_requirements,
     colorstr,
     increment_path,
-    non_max_suppression_without_batch,
+    non_max_suppression,
     print_args,
     scale_boxes,
     strip_optimizer,
@@ -76,7 +76,7 @@ def run(
 
     # Load model
     device = select_device(device)
-    model = DetectionModelNPU(cfg='models/yolov5s_npu.yaml', ch=3, nc=80)  # Initialize model with YAML config
+    model = DetectionModelSimple(cfg='models/yolov5s_npu.yaml', ch=3, nc=80)  # Initialize model with YAML config
     ckpt = torch.load(weights, map_location=device)  # load checkpoint
     model.load_state_dict(ckpt['model'].state_dict())  # load state dict
     model = model.to(device)  # move model to device
@@ -114,7 +114,7 @@ def run(
 
         # NMS
         with dt[2]:
-            pred = non_max_suppression_without_batch(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+            pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
 
         # Process predictions
         for i, det in enumerate(pred):  # per image

@@ -9,7 +9,7 @@ ROOT = FILE.parents[1]  # YOLOv5 root directory (parent of src)
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 
-from models.yolo_npu import DetectionModelNPU
+from models.yolo_simple import DetectionModelSimple
 from utils.general import LOGGER, check_img_size, check_requirements, print_args
 from utils.torch_utils import select_device, smart_inference_mode
 
@@ -127,7 +127,7 @@ def run(
 
     # Load PyTorch model
     ckpt = torch.load(weights, map_location=device)  # load checkpoint
-    model = DetectionModelNPU(cfg='models/yolov5s_npu.yaml', ch=3, nc=80).to(device)  # create model with NPU config
+    model = DetectionModelSimple(cfg='models/yolov5s_npu.yaml', ch=3, nc=80).to(device)  # create model with NPU config
     model.load_state_dict(ckpt['model'].float().state_dict(), strict=False)  # load state_dict
     stride = int(max(model.stride))  # convert stride to int
     names = model.names
