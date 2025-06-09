@@ -91,22 +91,25 @@ class Detect(nn.Module):
 
     def forward(self, x):
         """Processes input through YOLOv5 layers, altering shape for detection: `x(bs, 3, ny, nx, 85)`."""
+        
+        feature_map = [torch.zeros_like(x[i], device=x[i].device) for i in range(self.nl)]
+        # 所有情况都先做卷积
+        for i in range(self.nl):
+            feature_map[i] = self.m[i](x[i])  # conv# 
+        
+        # 训练过程，保持原始模型结构
         if self.training:
-            feature_map = [torch.zeros_like(x[i], device=x[i].device) for i in range(self.nl)]
             for i in range(self.nl):
-                feature_map[i] = self.m[i](x[i])  # conv
                 bs, _, ny, nx = feature_map[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
                 feature_map[i] = feature_map[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
             return feature_map
         else:
             infer_output = []  # inference output
-            feature_map = [torch.zeros_like(x[i], device=x[i].device) for i in range(self.nl)]
+            # 不需要分割，保持原始逻辑
             if isinstance(self, Segment):  # (boxes + masks)
                 for i in range(self.nl):
-                    feature_map[i] = self.m[i](x[i])  # conv
-                    bs, _, ny, nx = feature_map[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
+                    bs, _, ny, nx = feature_map[i].shape  # 获取特征图尺寸 (bs,255,20,20)
                     feature_map[i] = feature_map[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
-
                     if self.dynamic or self.grid[i].shape[2:4] != feature_map[i].shape[2:4]:
                         self.grid[i], self.anchor_grid[i] = self._make_grid(nx, ny, i)
                     xy, wh, conf, mask = feature_map[i].split((2, 2, self.nc + 1, self.no - self.nc - 5), 4)
@@ -115,44 +118,54 @@ class Detect(nn.Module):
                     y = torch.cat((xy, wh, conf.sigmoid(), mask), 4)
                     infer_output.append(y.view(bs, self.na * nx * ny, self.no))
             else: # Detect (boxes only)
-                for i in range(self.nl):  # 遍历每个检测层
-                    # 1. 通过1x1卷积处理特征图，将通道数变换为 255 (3 * 85)
-                    feature_map[i] = self.m[i](x[i])  # conv
-                    bs, _, ny, nx = feature_map[i].shape  # 获取特征图尺寸 (bs,255,20,20)
-                    
-                    # 2. 重排张量维度，避免使用5维张量
-                    # 从 (bs,255,20,20) 转换为 (bs,3*20*20,85)
-                    feature_map[i] = feature_map[i].reshape(bs, self.na, self.no, ny * nx)  # (bs,3,85,400)
-                    feature_map[i] = feature_map[i].transpose(2, 3)  # (bs,3,400,85)
-                    feature_map[i] = feature_map[i].reshape(bs, self.na * ny * nx, self.no)  # (bs,1200,85)
+                # 训练完成，验证的时候需要返回五维，因为需要做特征融合
+                if os.getenv("Training") == "1":
+                    for i in range(self.nl):  # 
+                        bs, _, ny, nx = feature_map[i].shape  # 获取特征图尺寸 (bs,255,20,20)
+                        if self.dynamic or self.grid[i].shape[2:4] != feature_map[i].shape[2:4]:
+                            self.grid[i], self.anchor_grid[i] = self._make_grid(nx, ny, i)
+                        xy, wh, conf = feature_map[i].sigmoid().split((2, 2, self.nc + 1), 4)
+                        xy = (xy * 2 + self.grid[i]) * self.stride[i]  # xy
+                        wh = (wh * 2) ** 2 * self.anchor_grid[i]  # wh
+                        y = torch.cat((xy, wh, conf), 4)
+                        infer_output.append(y)
+                #推理整个过程避免五维张量
+                else:
+                    for i in range(self.nl):  # 遍历每个检测层
+                        # 2. 重排张量维度，避免使用5维张量
+                        bs, _, ny, nx = feature_map[i].shape  # 获取特征图尺寸 (bs,255,20,20)
+                        # 从 (bs,255,20,20) 转换为 (bs,3*20*20,85)
+                        feature_map[i] = feature_map[i].reshape(bs, self.na, self.no, ny * nx)  # (bs,3,85,400)
+                        feature_map[i] = feature_map[i].transpose(2, 3)  # (bs,3,400,85)
+                        feature_map[i] = feature_map[i].reshape(bs, self.na * ny * nx, self.no)  # (bs,1200,85)
 
-                    # 3. 推理
-                    # 3.1 需要时重新生成网格
-                    if self.dynamic or self.grid[i].shape[1:2] != (ny * nx,):
-                        self.grid[i], self.anchor_grid[i] = self._make_grid_npu(nx, ny, i)
+                        # 3. 推理
+                        # 3.1 需要时重新生成网格
+                        if self.dynamic or self.grid[i].shape[1:2] != (ny * nx,):
+                            self.grid[i], self.anchor_grid[i] = self._make_grid_npu(nx, ny, i)
 
-                    # 3.2 解码预测框
-                    # sigmoid激活并分离坐标、宽高、置信度
-                    xy, wh, conf = feature_map[i].sigmoid().split((2, 2, self.nc + 1), -1)
-                    
-                    # 3.3 将相对坐标转换为绝对坐标
-                    # 重塑grid以匹配当前维度
-                    grid = self.grid[i].repeat(bs, self.na, 1, 1)  # (bs,na,ny*nx,2)
-                    anchor_grid = self.anchor_grid[i].repeat(bs, 1, 1)  # (bs,na*ny*nx,2)
-                    
-                    # 将xy reshape以匹配grid
-                    xy = xy.view(bs, self.na, -1, 2)  # (bs,na,ny*nx,2)
-                    
-                    # xy: (sigmoid(x) * 2 - 0.5 + grid) * stride
-                    xy = (xy * 2 + grid) * self.stride[i]  # xy
-                    xy = xy.view(bs, -1, 2)  # (bs,na*ny*nx,2)
-                    
-                    # wh: (sigmoid(w) * 2)^2 * anchor_grid
-                    wh = (wh * 2) ** 2 * anchor_grid  # wh
-                    
-                    # 3.4 合并所有预测结果
-                    y = torch.cat((xy, wh, conf), -1)  # (bs,na*ny*nx,85)
-                    infer_output.append(y) 
+                        # 3.2 解码预测框
+                        # sigmoid激活并分离坐标、宽高、置信度
+                        xy, wh, conf = feature_map[i].sigmoid().split((2, 2, self.nc + 1), -1)
+                        
+                        # 3.3 将相对坐标转换为绝对坐标
+                        # 重塑grid以匹配当前维度
+                        grid = self.grid[i].repeat(bs, self.na, 1, 1)  # (bs,na,ny*nx,2)
+                        anchor_grid = self.anchor_grid[i].repeat(bs, 1, 1)  # (bs,na*ny*nx,2)
+                        
+                        # 将xy reshape以匹配grid
+                        xy = xy.view(bs, self.na, -1, 2)  # (bs,na,ny*nx,2)
+                        
+                        # xy: (sigmoid(x) * 2 - 0.5 + grid) * stride
+                        xy = (xy * 2 + grid) * self.stride[i]  # xy
+                        xy = xy.view(bs, -1, 2)  # (bs,na*ny*nx,2)
+                        
+                        # wh: (sigmoid(w) * 2)^2 * anchor_grid
+                        wh = (wh * 2) ** 2 * anchor_grid  # wh
+                        
+                        # 3.4 合并所有预测结果
+                        y = torch.cat((xy, wh, conf), -1)  # (bs,na*ny*nx,85)
+                        infer_output.append(y) 
             if self.export:   
                 return (torch.cat(infer_output, 1),)
             else:
