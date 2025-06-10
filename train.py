@@ -997,5 +997,6 @@ def run(**kwargs):
 
 
 if __name__ == "__main__":
+    os.environ['TRAINING'] = 'True'
     opt = parse_opt()
     main(opt)
